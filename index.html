@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>布料物理模拟 - Three.js + Cannon-es</title>
+  <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+  <div id="app">
+    <canvas id="canvas"></canvas>
+    
+    <div id="control-panel">
+      <h2>控制面板</h2>
+      
+      <div class="control-group">
+        <h3>重力设置</h3>
+        <div class="control-item">
+          <label for="gravity">重力大小: <span id="gravity-value">-9.8</span></label>
+          <input type="range" id="gravity" min="-30" max="0" step="0.1" value="-9.8">
+        </div>
+      </div>
+      
+      <div class="control-group">
+        <h3>风力设置</h3>
+        <div class="control-item">
+          <label for="wind-x">风力 X: <span id="wind-x-value">0</span></label>
+          <input type="range" id="wind-x" min="-50" max="50" step="1" value="0">
+        </div>
+        <div class="control-item">
+          <label for="wind-y">风力 Y: <span id="wind-y-value">0</span></label>
+          <input type="range" id="wind-y" min="-50" max="50" step="1" value="0">
+        </div>
+        <div class="control-item">
+          <label for="wind-z">风力 Z: <span id="wind-z-value">0</span></label>
+          <input type="range" id="wind-z" min="-50" max="50" step="1" value="0">
+        </div>
+        <div class="control-item">
+          <label for="wind-strength">风力强度: <span id="wind-strength-value">1</span></label>
+          <input type="range" id="wind-strength" min="0" max="5" step="0.1" value="1">
+        </div>
+      </div>
+      
+      <div class="control-group">
+        <h3>布料属性</h3>
+        <div class="control-item">
+          <label for="stiffness">弹性系数: <span id="stiffness-value">10000</span></label>
+          <input type="range" id="stiffness" min="100" max="50000" step="100" value="10000">
+        </div>
+        <div class="control-item">
+          <label for="damping">阻尼系数: <span id="damping-value">0.5</span></label>
+          <input type="range" id="damping" min="0" max="1" step="0.01" value="0.5">
+        </div>
+      </div>
+      
+      <div class="control-group">
+        <h3>操作</h3>
+        <button id="reset-btn">重置布料</button>
+        <button id="pause-btn">暂停/继续</button>
+      </div>
+      
+      <div class="info">
+        <p>💡 使用鼠标拖拽布料的任意顶点</p>
+        <p id="status">状态: 运行中</p>
+      </div>
+    </div>
+  </div>
+  
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
