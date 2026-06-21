@@ -13,6 +13,11 @@ let dragOffset = new THREE.Vector3();
 let intersectionPoint = new THREE.Vector3();
 let segmentsX, segmentsY;
 let isPaused = false;
+let sharedPositions = null;
+let sharedPositionsView = null;
+let useSharedMemory = false;
+let lastDragSendTime = 0;
+const DRAG_SEND_INTERVAL = 16;
 
 const config = {
   gravity: -9.8,
@@ -202,9 +207,18 @@ function setupWorker() {
   });
   
   physicsWorker.onmessage = function(e) {
-    if (e.data.type === 'positions') {
-      const positions = new Float32Array(e.data.positions);
-      updateClothPositions(positions);
+    if (e.data.type === 'sharedMemory') {
+      sharedPositions = e.data.buffer;
+      sharedPositionsView = new Float32Array(sharedPositions);
+      useSharedMemory = true;
+      console.log('SharedArrayBuffer enabled for physics communication');
+    } else if (e.data.type === 'positions') {
+      if (e.data.shared && sharedPositionsView) {
+        updateClothPositions(sharedPositionsView);
+      } else {
+        const positions = new Float32Array(e.data.positions);
+        updateClothPositions(positions);
+      }
     }
   };
 }
@@ -213,16 +227,12 @@ function updateClothPositions(positions) {
   if (!clothGeometry) return;
   
   const geoPositions = clothGeometry.attributes.position.array;
+  const len = positions.length;
   
-  for (let i = 0; i < positions.length; i += 3) {
-    const vertexIndex = i / 3;
-    const geoX = vertexIndex % (segmentsX + 1);
-    const geoY = Math.floor(vertexIndex / (segmentsX + 1));
-    const geoIndex = (geoY * (segmentsX + 1) + geoX) * 3;
-    
-    geoPositions[geoIndex] = positions[i];
-    geoPositions[geoIndex + 1] = positions[i + 1];
-    geoPositions[geoIndex + 2] = positions[i + 2];
+  for (let i = 0; i < len; i += 3) {
+    geoPositions[i] = positions[i];
+    geoPositions[i + 1] = positions[i + 1];
+    geoPositions[i + 2] = positions[i + 2];
   }
   
   clothGeometry.attributes.position.needsUpdate = true;
@@ -323,12 +333,16 @@ function onMouseMove(event) {
     if (raycaster.ray.intersectPlane(dragPlane, intersectionPoint)) {
       const targetPos = intersectionPoint.clone().sub(dragOffset);
       
-      physicsWorker.postMessage({
-        type: 'dragMove',
-        x: targetPos.x,
-        y: targetPos.y,
-        z: targetPos.z
-      });
+      const now = performance.now();
+      if (now - lastDragSendTime >= DRAG_SEND_INTERVAL) {
+        lastDragSendTime = now;
+        physicsWorker.postMessage({
+          type: 'dragMove',
+          x: targetPos.x,
+          y: targetPos.y,
+          z: targetPos.z
+        });
+      }
     }
   }
 }

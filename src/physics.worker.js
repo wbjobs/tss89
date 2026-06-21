@@ -9,6 +9,9 @@ let windForce = new CANNON.Vec3(0, 0, 0);
 let windStrength = 1;
 let draggedParticleIndex = -1;
 let dragTarget = new CANNON.Vec3();
+let smoothedDragTarget = new CANNON.Vec3();
+let sharedPositions = null;
+let sharedPositionsView = null;
 
 const CLOTH_WIDTH = 10;
 const CLOTH_HEIGHT = 10;
@@ -16,6 +19,10 @@ const SEGMENTS_X = 20;
 const SEGMENTS_Y = 20;
 const SPACING_X = CLOTH_WIDTH / SEGMENTS_X;
 const SPACING_Y = CLOTH_HEIGHT / SEGMENTS_Y;
+const MAX_VELOCITY = 15;
+const MAX_WIND_FORCE = 20;
+const SOLVER_ITERATIONS = 60;
+const DRAG_SMOOTHING = 0.2;
 
 function initCloth(config) {
   clothConfig = config;
@@ -25,7 +32,9 @@ function initCloth(config) {
   });
   
   world.broadphase = new CANNON.NaiveBroadphase();
-  world.solver.iterations = 20;
+  world.solver.iterations = SOLVER_ITERATIONS;
+  world.solver.tolerance = 0;
+  world.allowSleep = false;
   
   particles = [];
   constraints = [];
@@ -75,12 +84,28 @@ function initCloth(config) {
   ground.collisionFilterMask = 2;
   world.addBody(ground);
   
+  initSharedMemory();
   sendPositions();
+}
+
+function initSharedMemory() {
+  if (typeof SharedArrayBuffer !== 'undefined') {
+    try {
+      const byteLength = particles.length * 3 * 4;
+      sharedPositions = new SharedArrayBuffer(byteLength);
+      sharedPositionsView = new Float32Array(sharedPositions);
+    } catch (e) {
+      console.warn('SharedArrayBuffer not available, falling back to transferable objects');
+      sharedPositions = null;
+    }
+  }
 }
 
 function createConstraints(stiffness) {
   constraints.forEach(c => world.removeConstraint(c));
   constraints = [];
+  
+  const maxForce = stiffness * 10;
   
   for (let y = 0; y <= SEGMENTS_Y; y++) {
     for (let x = 0; x <= SEGMENTS_X; x++) {
@@ -94,6 +119,7 @@ function createConstraints(stiffness) {
           SPACING_X,
           stiffness
         );
+        distConstraint.maxForce = maxForce;
         world.addConstraint(distConstraint);
         constraints.push(distConstraint);
       }
@@ -106,6 +132,7 @@ function createConstraints(stiffness) {
           SPACING_Y,
           stiffness
         );
+        distConstraint.maxForce = maxForce;
         world.addConstraint(distConstraint);
         constraints.push(distConstraint);
       }
@@ -117,8 +144,9 @@ function createConstraints(stiffness) {
           particles[index],
           particles[diagIndex],
           diagDist,
-          stiffness * 0.5
+          stiffness * 0.7
         );
+        diagConstraint.maxForce = maxForce * 0.7;
         world.addConstraint(diagConstraint);
         constraints.push(diagConstraint);
       }
@@ -130,8 +158,9 @@ function createConstraints(stiffness) {
           particles[index],
           particles[diagIndex2],
           diagDist2,
-          stiffness * 0.5
+          stiffness * 0.7
         );
+        diagConstraint2.maxForce = maxForce * 0.7;
         world.addConstraint(diagConstraint2);
         constraints.push(diagConstraint2);
       }
@@ -139,8 +168,24 @@ function createConstraints(stiffness) {
   }
 }
 
+function clampVelocity(particle) {
+  const vel = particle.velocity;
+  const speed = vel.length();
+  
+  if (speed > MAX_VELOCITY) {
+    vel.scale(MAX_VELOCITY / speed, vel);
+  }
+}
+
 function applyWind() {
   const wind = windForce.scale(windStrength);
+  const windLen = wind.length();
+  
+  if (windLen < 0.01) return;
+  
+  const clampedWind = windLen > MAX_WIND_FORCE 
+    ? wind.scale(MAX_WIND_FORCE / windLen) 
+    : wind;
   
   for (let y = 0; y < SEGMENTS_Y; y++) {
     for (let x = 0; x < SEGMENTS_X; x++) {
@@ -157,12 +202,14 @@ function applyWind() {
       const edge1 = new CANNON.Vec3().subVectors(p10, p00);
       const edge2 = new CANNON.Vec3().subVectors(p01, p00);
       const normal = new CANNON.Vec3().crossVectors(edge1, edge2);
-      normal.normalize();
+      const normalLen = normal.length();
       
-      const area = normal.length() * 0.5;
-      normal.normalize();
+      if (normalLen < 0.0001) continue;
       
-      const forceMagnitude = wind.dot(normal) * area;
+      normal.scale(1 / normalLen, normal);
+      
+      const area = normalLen * 0.5;
+      const forceMagnitude = clampedWind.dot(normal) * area;
       const force = normal.scale(forceMagnitude);
       
       const quarterForce = force.scale(0.25);
@@ -178,39 +225,77 @@ function applyWind() {
 function updateDrag() {
   if (draggedParticleIndex >= 0 && draggedParticleIndex < particles.length) {
     const particle = particles[draggedParticleIndex];
-    const currentPos = particle.position;
-    const targetPos = dragTarget;
     
-    const stiffness = 100;
-    const damping = 10;
+    smoothedDragTarget.x += (dragTarget.x - smoothedDragTarget.x) * DRAG_SMOOTHING;
+    smoothedDragTarget.y += (dragTarget.y - smoothedDragTarget.y) * DRAG_SMOOTHING;
+    smoothedDragTarget.z += (dragTarget.z - smoothedDragTarget.z) * DRAG_SMOOTHING;
+    
+    const currentPos = particle.position;
+    const targetPos = smoothedDragTarget;
     
     const diff = new CANNON.Vec3().subVectors(targetPos, currentPos);
+    const dist = diff.length();
+    
+    const maxDist = 3;
+    if (dist > maxDist) {
+      diff.scale(maxDist / dist, diff);
+      targetPos.vadd(currentPos, diff);
+    }
+    
+    const kp = 500;
+    const kd = 30;
     const vel = particle.velocity;
     
-    const force = diff.scale(stiffness).vsub(vel.scale(damping));
+    const force = diff.scale(kp).vsub(vel.scale(kd));
+    
+    const maxForce = 500;
+    const forceLen = force.length();
+    if (forceLen > maxForce) {
+      force.scale(maxForce / forceLen, force);
+    }
+    
     particle.applyForce(force, currentPos);
+    clampVelocity(particle);
   }
 }
 
 function sendPositions() {
-  const positions = new Float32Array(particles.length * 3);
-  
-  for (let i = 0; i < particles.length; i++) {
-    const pos = particles[i].position;
-    positions[i * 3] = pos.x;
-    positions[i * 3 + 1] = pos.y;
-    positions[i * 3 + 2] = pos.z;
+  if (sharedPositions && sharedPositionsView) {
+    for (let i = 0; i < particles.length; i++) {
+      const pos = particles[i].position;
+      sharedPositionsView[i * 3] = pos.x;
+      sharedPositionsView[i * 3 + 1] = pos.y;
+      sharedPositionsView[i * 3 + 2] = pos.z;
+    }
+    
+    self.postMessage({
+      type: 'positions',
+      shared: true,
+      segmentsX: SEGMENTS_X,
+      segmentsY: SEGMENTS_Y
+    });
+  } else {
+    const positions = new Float32Array(particles.length * 3);
+    
+    for (let i = 0; i < particles.length; i++) {
+      const pos = particles[i].position;
+      positions[i * 3] = pos.x;
+      positions[i * 3 + 1] = pos.y;
+      positions[i * 3 + 2] = pos.z;
+    }
+    
+    self.postMessage({
+      type: 'positions',
+      positions: positions.buffer,
+      shared: false,
+      segmentsX: SEGMENTS_X,
+      segmentsY: SEGMENTS_Y
+    }, [positions.buffer]);
   }
-  
-  self.postMessage({
-    type: 'positions',
-    positions: positions.buffer,
-    segmentsX: SEGMENTS_X,
-    segmentsY: SEGMENTS_Y
-  }, [positions.buffer]);
 }
 
 let lastTime = performance.now();
+let frameCount = 0;
 
 function simulate() {
   if (!isPaused && world) {
@@ -221,8 +306,18 @@ function simulate() {
     applyWind();
     updateDrag();
     
-    world.step(1 / 60, dt, 3);
-    sendPositions();
+    world.step(1 / 60, dt, 4);
+    
+    particles.forEach(p => {
+      if (p.mass > 0) {
+        clampVelocity(p);
+      }
+    });
+    
+    frameCount++;
+    if (frameCount % 2 === 0) {
+      sendPositions();
+    }
   } else {
     lastTime = performance.now();
   }
@@ -236,6 +331,13 @@ self.onmessage = function(e) {
   switch (message.type) {
     case 'init':
       initCloth(message.config);
+      if (sharedPositions) {
+        self.postMessage({
+          type: 'sharedMemory',
+          buffer: sharedPositions,
+          length: particles.length * 3
+        });
+      }
       simulate();
       break;
       
@@ -270,6 +372,11 @@ self.onmessage = function(e) {
       
     case 'dragStart':
       draggedParticleIndex = message.index;
+      if (draggedParticleIndex >= 0 && draggedParticleIndex < particles.length) {
+        const pos = particles[draggedParticleIndex].position;
+        dragTarget.copy(pos);
+        smoothedDragTarget.copy(pos);
+      }
       break;
       
     case 'dragMove':
