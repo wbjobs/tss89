@@ -4,10 +4,12 @@ import PhysicsWorker from './physics.worker.js?worker';
 
 let scene, camera, renderer, controls;
 let clothMesh, clothGeometry;
+let colliderMesh, colliderRadius;
 let physicsWorker;
 let raycaster, mouse;
 let isDragging = false;
 let draggedVertexIndex = -1;
+let isColliderDragging = false;
 let dragPlane = new THREE.Plane();
 let dragOffset = new THREE.Vector3();
 let intersectionPoint = new THREE.Vector3();
@@ -18,6 +20,13 @@ let sharedPositionsView = null;
 let useSharedMemory = false;
 let lastDragSendTime = 0;
 const DRAG_SEND_INTERVAL = 16;
+
+let currentTool = 'drag';
+let cutLinePoints = [];
+let cutLineMesh = null;
+let cutLineGeometry = null;
+let isCutting = false;
+let totalCuts = 0;
 
 const config = {
   gravity: -9.8,
@@ -64,6 +73,7 @@ function init() {
   setupLights();
   createGround();
   createCloth();
+  createCutLineVisual();
   
   raycaster = new THREE.Raycaster();
   mouse = new THREE.Vector2();
@@ -139,14 +149,6 @@ function createCloth() {
   }
   clothGeometry.attributes.position.needsUpdate = true;
   
-  const uvs = clothGeometry.attributes.uv.array;
-  for (let i = 0; i < uvs.length; i += 2) {
-    const x = uvs[i];
-    const y = uvs[i + 1];
-    const stripe = Math.floor(x * 20) % 2 === 0 ? 1 : 0.7;
-    uvs[i + 1] = y * stripe + (1 - y) * stripe;
-  }
-  
   const clothMaterial = new THREE.MeshStandardMaterial({
     color: 0x3b82f6,
     roughness: 0.6,
@@ -170,6 +172,40 @@ function createCloth() {
   clothMesh.add(wireframe);
   
   createCornerMarkers();
+}
+
+function createCollider(position, radius) {
+  colliderRadius = radius;
+  const colliderGeometry = new THREE.SphereGeometry(radius, 32, 32);
+  const colliderMaterial = new THREE.MeshStandardMaterial({
+    color: 0xf59e0b,
+    roughness: 0.3,
+    metalness: 0.7,
+    emissive: 0xf59e0b,
+    emissiveIntensity: 0.1
+  });
+  
+  colliderMesh = new THREE.Mesh(colliderGeometry, colliderMaterial);
+  colliderMesh.position.set(position.x, position.y, position.z);
+  colliderMesh.castShadow = true;
+  colliderMesh.receiveShadow = true;
+  scene.add(colliderMesh);
+}
+
+function createCutLineVisual() {
+  cutLineGeometry = new THREE.BufferGeometry();
+  cutLineGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3 * 1000), 3));
+  
+  const cutLineMaterial = new THREE.LineBasicMaterial({
+    color: 0xef4444,
+    linewidth: 3,
+    transparent: true,
+    opacity: 0.9
+  });
+  
+  cutLineMesh = new THREE.Line(cutLineGeometry, cutLineMaterial);
+  cutLineMesh.visible = false;
+  scene.add(cutLineMesh);
 }
 
 function createCornerMarkers() {
@@ -219,6 +255,17 @@ function setupWorker() {
         const positions = new Float32Array(e.data.positions);
         updateClothPositions(positions);
       }
+    } else if (e.data.type === 'collider') {
+      if (!colliderMesh) {
+        createCollider(e.data.position, e.data.radius);
+      }
+    } else if (e.data.type === 'colliderPos') {
+      if (colliderMesh && !isColliderDragging) {
+        colliderMesh.position.set(e.data.x, e.data.y, e.data.z);
+      }
+    } else if (e.data.type === 'cutResult') {
+      totalCuts = e.data.totalCuts;
+      document.getElementById('cut-counter').textContent = `已切割: ${totalCuts} 处 (本次移除 ${e.data.removed} 约束)`;
     }
   };
 }
@@ -293,8 +340,95 @@ function findNearestVertex() {
   return -1;
 }
 
+function getWorldPointOnCloth() {
+  raycaster.setFromCamera(mouse, camera);
+  const intersects = raycaster.intersectObject(clothMesh);
+  
+  if (intersects.length > 0) {
+    const point = intersects[0].point;
+    const geoPositions = clothGeometry.attributes.position.array;
+    
+    let bary = intersects[0].face ? intersects[0].uv : null;
+    
+    return point;
+  }
+  return null;
+}
+
+function worldPointToUV(point) {
+  const halfW = 5;
+  const halfH = 5;
+  
+  raycaster.setFromCamera(mouse, camera);
+  const intersects = raycaster.intersectObject(clothMesh);
+  
+  if (intersects.length > 0 && intersects[0].uv) {
+    return {
+      x: intersects[0].uv.x * segmentsX,
+      y: (1 - intersects[0].uv.y) * segmentsY
+    };
+  }
+  
+  const positions = clothGeometry.attributes.position.array;
+  let minDist = Infinity;
+  let bestUV = null;
+  
+  for (let i = 0; i < positions.length; i += 3) {
+    const dx = point.x - positions[i];
+    const dy = point.y - positions[i + 1];
+    const dz = point.z - positions[i + 2];
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    
+    if (dist < minDist) {
+      minDist = dist;
+      const vertexIndex = i / 3;
+      const gx = vertexIndex % (segmentsX + 1);
+      const gy = Math.floor(vertexIndex / (segmentsX + 1));
+      bestUV = { x: gx, y: gy };
+    }
+  }
+  
+  return bestUV;
+}
+
 function onMouseDown(event) {
   getMousePosition(event);
+  
+  if (currentTool === 'cut') {
+    const worldPoint = getWorldPointOnCloth();
+    if (worldPoint) {
+      isCutting = true;
+      cutLinePoints = [];
+      const uv = worldPointToUV(worldPoint);
+      if (uv) cutLinePoints.push(uv);
+      
+      cutLineMesh.visible = true;
+      addCutPointToVisual(worldPoint);
+    }
+    return;
+  }
+  
+  raycaster.setFromCamera(mouse, camera);
+  
+  if (colliderMesh) {
+    const colliderHits = raycaster.intersectObject(colliderMesh);
+    if (colliderHits.length > 0) {
+      intersectionPoint.copy(colliderHits[0].point);
+      
+      const normal = new THREE.Vector3(0, 0, 1);
+      normal.applyQuaternion(camera.quaternion);
+      dragPlane.setFromNormalAndCoplanarPoint(normal, colliderMesh.position);
+      
+      raycaster.ray.intersectPlane(dragPlane, dragOffset);
+      dragOffset.sub(colliderMesh.position);
+      
+      isColliderDragging = true;
+      controls.enabled = false;
+      
+      physicsWorker.postMessage({ type: 'colliderDragStart' });
+      return;
+    }
+  }
   
   const vertexIndex = findNearestVertex();
   if (vertexIndex >= 0) {
@@ -327,6 +461,47 @@ function onMouseDown(event) {
 function onMouseMove(event) {
   getMousePosition(event);
   
+  if (currentTool === 'cut' && isCutting) {
+    const worldPoint = getWorldPointOnCloth();
+    if (worldPoint) {
+      const uv = worldPointToUV(worldPoint);
+      if (uv) {
+        const lastPoint = cutLinePoints[cutLinePoints.length - 1];
+        if (!lastPoint || 
+            Math.abs(uv.x - lastPoint.x) > 0.3 || 
+            Math.abs(uv.y - lastPoint.y) > 0.3) {
+          cutLinePoints.push(uv);
+          addCutPointToVisual(worldPoint);
+        }
+      }
+    }
+    return;
+  }
+  
+  if (isColliderDragging) {
+    raycaster.setFromCamera(mouse, camera);
+    
+    if (raycaster.ray.intersectPlane(dragPlane, intersectionPoint)) {
+      const targetPos = intersectionPoint.clone().sub(dragOffset);
+      
+      targetPos.y = Math.max(targetPos.y, -4.5 + colliderRadius);
+      
+      colliderMesh.position.copy(targetPos);
+      
+      const now = performance.now();
+      if (now - lastDragSendTime >= DRAG_SEND_INTERVAL) {
+        lastDragSendTime = now;
+        physicsWorker.postMessage({
+          type: 'colliderDragMove',
+          x: targetPos.x,
+          y: targetPos.y,
+          z: targetPos.z
+        });
+      }
+    }
+    return;
+  }
+  
   if (isDragging && draggedVertexIndex >= 0) {
     raycaster.setFromCamera(mouse, camera);
     
@@ -348,6 +523,33 @@ function onMouseMove(event) {
 }
 
 function onMouseUp() {
+  if (currentTool === 'cut' && isCutting) {
+    isCutting = false;
+    
+    setTimeout(() => {
+      if (cutLineMesh) {
+        cutLineMesh.visible = false;
+      }
+    }, 500);
+    
+    if (cutLinePoints.length >= 2) {
+      physicsWorker.postMessage({
+        type: 'cut',
+        points: cutLinePoints
+      });
+    }
+    
+    cutLinePoints = [];
+    return;
+  }
+  
+  if (isColliderDragging) {
+    isColliderDragging = false;
+    controls.enabled = true;
+    physicsWorker.postMessage({ type: 'colliderDragEnd' });
+    return;
+  }
+  
   if (isDragging) {
     isDragging = false;
     draggedVertexIndex = -1;
@@ -357,6 +559,25 @@ function onMouseUp() {
       type: 'dragEnd'
     });
   }
+}
+
+function addCutPointToVisual(worldPoint) {
+  const positions = cutLineGeometry.attributes.position.array;
+  const count = cutLinePoints.length;
+  
+  if (count * 3 > positions.length) {
+    const newArr = new Float32Array(count * 3 + 3000);
+    newArr.set(positions);
+    cutLineGeometry.setAttribute('position', new THREE.BufferAttribute(newArr, 3));
+  }
+  
+  const idx = (count - 1) * 3;
+  cutLineGeometry.attributes.position.array[idx] = worldPoint.x;
+  cutLineGeometry.attributes.position.array[idx + 1] = worldPoint.y;
+  cutLineGeometry.attributes.position.array[idx + 2] = worldPoint.z;
+  
+  cutLineGeometry.setDrawRange(0, count);
+  cutLineGeometry.attributes.position.needsUpdate = true;
 }
 
 function onTouchStart(event) {
@@ -384,6 +605,28 @@ function onWindowResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+function setTool(tool) {
+  currentTool = tool;
+  
+  const dragBtn = document.getElementById('tool-drag');
+  const cutBtn = document.getElementById('tool-cut');
+  const toolInfo = document.getElementById('tool-info');
+  const canvas = document.getElementById('canvas');
+  
+  dragBtn.classList.remove('active');
+  cutBtn.classList.remove('active');
+  
+  if (tool === 'drag') {
+    dragBtn.classList.add('active');
+    toolInfo.textContent = '拖拽布料顶点或下方球体';
+    canvas.classList.remove('cut-mode');
+  } else {
+    cutBtn.classList.add('active');
+    toolInfo.textContent = '在布料上按住鼠标画线进行切割';
+    canvas.classList.add('cut-mode');
+  }
 }
 
 function setupControls() {
@@ -453,6 +696,8 @@ function setupControls() {
   document.getElementById('reset-btn').addEventListener('click', () => {
     physicsWorker.postMessage({ type: 'reset' });
     isPaused = false;
+    totalCuts = 0;
+    document.getElementById('cut-counter').textContent = '已切割: 0 处';
     updateStatus();
   });
   
@@ -461,6 +706,9 @@ function setupControls() {
     physicsWorker.postMessage({ type: 'pause', value: isPaused });
     updateStatus();
   });
+  
+  document.getElementById('tool-drag').addEventListener('click', () => setTool('drag'));
+  document.getElementById('tool-cut').addEventListener('click', () => setTool('cut'));
 }
 
 function updateWind() {

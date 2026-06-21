@@ -54,13 +54,24 @@
       </div>
       
       <div class="control-group">
+        <h3>工具栏</h3>
+        <div class="tool-buttons">
+          <button id="tool-drag" class="tool-btn active">🔗 拖拽模式</button>
+          <button id="tool-cut" class="tool-btn">✂️ 切割模式</button>
+        </div>
+        <p id="tool-info" class="tool-info">拖拽布料顶点或下方球体</p>
+      </div>
+      
+      <div class="control-group">
         <h3>操作</h3>
         <button id="reset-btn">重置布料</button>
         <button id="pause-btn">暂停/继续</button>
       </div>
       
       <div class="info">
-        <p>💡 使用鼠标拖拽布料的任意顶点</p>
+        <p>� 拖拽模式: 拖顶点/球体</p>
+        <p>✂️ 切割模式: 在布料上画线切割</p>
+        <p id="cut-counter">已切割: 0 处</p>
         <p id="status">状态: 运行中</p>
       </div>
     </div>
